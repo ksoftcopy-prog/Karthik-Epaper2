@@ -1,0 +1,130 @@
+import os
+import fitz  # PyMuPDF
+import gc
+from flask import Flask, render_template_string, request, redirect, url_for, session
+from datetime import datetime
+
+app = Flask(__name__)
+app.secret_key = 'telangana_secure_2026'
+
+# ఫోల్డర్ సెట్టింగ్స్
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static/epaper_data')
+ADMIN_PASS = "123"
+
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# --- PDF ని ఇమేజ్‌లుగా మార్చే ఫంక్షన్ (Optimized for Render Free RAM) ---
+def save_pdf_pages(pdf_path, output_folder):
+    doc = fitz.open(pdf_path)
+    for i in range(len(doc)):
+        page = doc.load_page(i)
+        # 1.5 క్వాలిటీ మరియు మెమరీకి మధ్య బ్యాలెన్స్‌గా ఉంటుంది
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+        pix.save(os.path.join(output_folder, f"p{i+1}.jpg"))
+        pix = None  # మెమరీని ఖాళీ చేయడానికి
+    doc.close()
+    gc.collect()  # బలవంతంగా మెమరీని క్లీన్ చేస్తుంది
+    return len(doc)
+
+# --- HTML UI Template ---
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Mana Telangana E-Paper</title>
+    <style>
+        :root { --gold: #ffc107; --red: #ce1212; }
+        body { margin: 0; font-family: sans-serif; background: #444; }
+        header { background: white; padding: 10px 40px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #ddd; }
+        .toolbar { background: #f8f9fa; padding: 10px 40px; display: flex; gap: 15px; border-bottom: 2px solid var(--gold); align-items: center; }
+        .btn { background: var(--gold); border: none; padding: 8px 15px; font-weight: bold; cursor: pointer; border-radius: 4px; text-decoration: none; color: black; }
+        .main-container { display: flex; height: calc(100vh - 120px); }
+        .sidebar { width: 220px; background: white; border-right: 1px solid #ddd; overflow-y: auto; padding: 15px; }
+        .viewer { flex: 1; overflow: auto; padding: 20px; text-align: center; background: #555; }
+        .page-box { background: white; box-shadow: 0 0 20px rgba(0,0,0,0.5); display: inline-block; margin-bottom: 20px; }
+        .page-box img { width: 800px; display: block; }
+        .thumb { width: 100%; border: 1px solid #ddd; margin-bottom: 10px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1 style="color:var(--red); margin:0; font-family: serif;">MANA TELANGANA</h1>
+        <a href="/login" style="text-decoration:none; color:#666;">Admin</a>
+    </header>
+
+    <div class="toolbar">
+        <label>📅 Archive:</label>
+        <input type="date" value="{{date}}" onchange="location.href='/?date='+this.value">
+    </div>
+
+    <div class="main-container">
+        <div class="sidebar">
+            {% for i in range(pages) %}
+            <div onclick="document.getElementById('p{{i+1}}').scrollIntoView()">
+                <img src="/static/epaper_data/{{date}}/p{{i+1}}.jpg" class="thumb">
+                <p align="center">Page {{i+1}}</p>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="viewer">
+            {% for i in range(pages) %}
+            <div id="p{{i+1}}" class="page-box">
+                <img src="/static/epaper_data/{{date}}/p{{i+1}}.jpg">
+            </div><br>
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+# --- Routes ---
+@app.route('/')
+def home():
+    selected_date = request.args.get('date', datetime.now().strftime("%Y-%m-%d"))
+    path = os.path.join(UPLOAD_FOLDER, selected_date)
+    pages = 0
+    if os.path.exists(path):
+        pages = len([f for f in os.listdir(path) if f.endswith('.jpg')])
+    
+    if pages > 0:
+        return render_template_string(HTML_TEMPLATE, date=selected_date, pages=pages)
+    return f"<body style='text-align:center;padding-top:100px;'><h1>Mana Telangana E-Paper</h1><p>No paper available for {selected_date}</p><a href='/login'>Admin Login</a></body>"
+
+@app.route('/login')
+def login():
+    return '<body style="text-align:center;padding-top:100px;"><h2>Admin Login</h2><form action="/auth" method="post">Password: <input type="password" name="p"><button>Login</button></form></body>'
+
+@app.route('/auth', methods=['POST'])
+def auth():
+    if request.form.get('p') == ADMIN_PASS:
+        session['admin'] = True
+        return redirect('/dashboard')
+    return "Wrong Password"
+
+@app.route('/dashboard')
+def dashboard():
+    if not session.get('admin'): return redirect('/login')
+    return '<h2>Admin Panel</h2><form action="/upload" method="post" enctype="multipart/form-data">Date: <input type="date" name="d" required><br><br>PDF: <input type="file" name="f" required><br><br><button>Upload</button></form>'
+
+@app.route('/upload', methods=['POST'])
+def upload():
+    if not session.get('admin'): return "Unauthorized"
+    f = request.files.get('f')
+    d = request.form.get('d')
+    if f and d:
+        p = os.path.join(UPLOAD_FOLDER, d)
+        os.makedirs(p, exist_ok=True)
+        pdf_path = os.path.join(p, "temp.pdf")
+        f.save(pdf_path)
+        save_pdf_pages(pdf_path, p)
+        if os.path.exists(pdf_path): os.remove(pdf_path)
+        return redirect(f'/?date={d}')
+    return "Error"
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
